@@ -1,0 +1,186 @@
+services:
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://chatbot:password@postgres:5432/chatbot
+      - OPENSEARCH_URL=http://opensearch-node:9200
+      - RERANKER_URL=http://tei-reranker:80
+    networks:
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch-node:
+        condition: service_healthy
+      tei-reranker:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: chatbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: chatbot
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: chatbot-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - app-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    # Give the container enough headroom so the internal task runner
+    # (which shares this container's memory/CPU) never starves while
+    # PDFs are being extracted/chunked. Adjust to your host's capacity.
+    mem_limit: 2g
+    cpus: 1.5
+    environment:
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_RUNNERS_MODE=internal
+      # How long a single Code node task may run before it's killed.
+      - N8N_RUNNERS_TASK_TIMEOUT=300
+      # How long n8n waits for a runner to pick up a task before failing
+      # with "Task request timed out". Raised as a safety margin; the
+      # real fix is the healthchecks/resources above, this is a backstop.
+      - N8N_RUNNERS_TASK_REQUEST_TIMEOUT=180
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - GENERIC_TIMEZONE=UTC
+    networks:
+      - app-network
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      backend:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      opensearch-node:
+        condition: service_healthy
+      tei-reranker:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    networks:
+      - app-network
+    volumes:
+      - ollama_data:/root/.ollama
+
+  opensearch-node:
+    image: opensearchproject/opensearch:latest
+    container_name: chatbot-opensearch
+    restart: unless-stopped
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_SECURITY_PLUGIN=true # Set to false and configure SSL/auth for production
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    networks:
+      - app-network
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:latest
+    container_name: chatbot-opensearch-dashboards
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch-node:9200"]'
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    networks:
+      - app-network
+    depends_on:
+      opensearch-node:
+        condition: service_healthy
+
+  tei-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+    # For GPU: swap the image above for the non-cpu tag and uncomment the
+    # deploy.resources block below (requires nvidia-container-toolkit).
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    container_name: tei-reranker
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - tei_data:/data
+    networks:
+      - app-network
+    command: --model-id BAAI/bge-reranker-base
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://localhost:80/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  n8n_data:
+  ollama_data:
+  opensearch_data:
+  tei_data:
