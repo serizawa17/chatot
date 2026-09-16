@@ -1,0 +1,814 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "2021f787-1525-4a97-b5fa-c5fd54cd35e7",
+      "name": "Setup Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        1520
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE EXTENSION IF NOT EXISTS vector;\n\nCREATE TABLE IF NOT EXISTS document_chunks (\n  chunk_id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  document_name TEXT,\n  page_number INTEGER,\n  original_content TEXT,\n  contextual_content TEXT,\n  content TEXT,\n  embedding vector(768),\n  created_at TIMESTAMPTZ DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS document_chunks_embedding_idx\nON document_chunks\nUSING hnsw (embedding vector_cosine_ops);\n\nCREATE TABLE IF NOT EXISTS lexical_documents (\n  chunk_id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  document_name TEXT,\n  page_number INTEGER,\n  content TEXT,\n  created_at TIMESTAMPTZ DEFAULT now()\n);",
+        "options": {}
+      },
+      "id": "6bf0c239-a669-4e54-a0a7-3443f709f90f",
+      "name": "Create PostgreSQL Schema",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        592,
+        1408
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "o1oz7Ez2o2RHgqCc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "http://opensearch-node:9200/rag_chunk2",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ settings: { analysis: { filter: { french_stop: { type: 'stop', stopwords: '_french_' }, french_stemmer: { type: 'stemmer', language: 'light_french' } }, analyzer: { rag_french: { type: 'custom', tokenizer: 'standard', filter: ['lowercase','french_stop','french_stemmer'] } } } }, mappings: { properties: { chunk_id: { type: 'keyword' }, document_id: { type: 'keyword' }, document_name: { type: 'keyword' }, page_number: { type: 'integer' }, content: { type: 'text', analyzer: 'rag_french' } } } }) }}",
+        "options": {}
+      },
+      "id": "3d2119c7-d3e4-4ff8-bbf7-338d0ed7614b",
+      "name": "Create OpenSearch Index",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        592,
+        1616
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "04915e64-e630-40d8-b78e-86fe45c88a97",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        608,
+        2080
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const CHUNK_SIZE = 700;\nconst CHUNK_OVERLAP = 100;\n\nfunction splitText(text, size, overlap) {\n  const chunks = [];\n  let start = 0;\n\n  while (start < text.length) {\n    const end = Math.min(start + size, text.length);\n    const chunk = text.slice(start, end).trim();\n\n    if (chunk.length > 0) {\n      chunks.push({\n        text: chunk,\n        start\n      });\n    }\n\n    if (end >= text.length) break;\n\n    start = Math.max(end - overlap, start + 1);\n  }\n\n  return chunks;\n}\n\nfor (const item of items) {\n  const text = String(item.json.text || item.json.content || '').trim();\n\n  const documentName =\n    item.binary?.data?.fileName ||\n    item.json.fileName ||\n    'document.pdf';\n\n  const documentId = item.json.document_id || `doc-${$execution.id}`;\n\n  const chunks = splitText(text, CHUNK_SIZE, CHUNK_OVERLAP);\n\n  return chunks.map((chunk, index) => ({\n    json: {\n      document_id: documentId,\n      document_name: documentName,\n      chunk_id: `${documentId}-${index}`,\n      chunk_index: index,\n      page_number: null,\n      original_content: chunk.text,\n      contextual_content: '',\n      content: chunk.text\n    }\n  }));\n}\n\nreturn [];"
+      },
+      "id": "d6361794-32f3-47f6-8ce0-a21cc9d453f5",
+      "name": "Chunk Document",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        880,
+        2080
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  const j = item.json;\n\n  return {\n    json: {\n      document_id: j.document_id,\n      document_name: j.document_name,\n      chunk_id: j.chunk_id,\n      chunk_index: j.chunk_index,\n      page_number: j.page_number ?? null,\n      original_content: j.original_content || j.content || '',\n      contextual_content: '',\n      content: j.content || j.original_content || ''\n    }\n  };\n});"
+      },
+      "id": "677f6f51-25bf-4843-9d75-addcb4b90b0a",
+      "name": "Build Index Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        2080
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "http://opensearch-node:9200/rag_chunk2/_doc/{{$json.chunk_id}}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chunk_id: $json.chunk_id, document_id: $json.document_id, document_name: $json.document_name, page_number: $json.page_number, content: $json.content || $json.original_content || '' }) }}",
+        "options": {}
+      },
+      "id": "30ee5667-d417-4a42-880a-ca19ed9dbbd6",
+      "name": "Index BM25 OpenSearch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        1904
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lexical_documents\n(chunk_id, document_id, document_name, page_number, content)\nVALUES\n(\n  '{{ $json.chunk_id }}',\n  '{{ $json.document_id }}',\n  '{{ ($json.document_name || '').replace(/'/g, \"''\") }}',\n  {{ $json.page_number ?? 'NULL' }},\n  '{{ ($json.content || '').replace(/'/g, \"''\") }}'\n)\nON CONFLICT (chunk_id)\nDO UPDATE SET\n  document_id = EXCLUDED.document_id,\n  document_name = EXCLUDED.document_name,\n  page_number = EXCLUDED.page_number,\n  content = EXCLUDED.content;",
+        "options": {}
+      },
+      "id": "42bdff36-5220-48da-8d0d-e13a60f99604",
+      "name": "Store BM25 Metadata",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        2080
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "o1oz7Ez2o2RHgqCc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'nomic-embed-text', prompt: $json.content || $json.original_content || '' }) }}",
+        "options": {}
+      },
+      "id": "9faa76c3-4ec4-487d-96c0-19b2cc9631c5",
+      "name": "Generate Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        2256
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "44a2e5e3-cb56-4ec1-baf8-7d736a792bb1",
+      "name": "Merge With Embedding",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1728,
+        2256
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO document_chunks\n(\n  chunk_id,\n  document_id,\n  document_name,\n  page_number,\n  original_content,\n  contextual_content,\n  content,\n  embedding\n)\nVALUES\n(\n  '{{ $json.chunk_id }}',\n  '{{ $json.document_id }}',\n  '{{ ($json.document_name || '').replace(/'/g, \"''\") }}',\n  {{ $json.page_number ?? 'NULL' }},\n  '{{ ($json.original_content || '').replace(/'/g, \"''\") }}',\n  '',\n  '{{ ($json.content || '').replace(/'/g, \"''\") }}',\n  '{{ JSON.stringify($json.embedding) }}'::vector\n)\nON CONFLICT (chunk_id)\nDO UPDATE SET\n  document_name = EXCLUDED.document_name,\n  page_number = EXCLUDED.page_number,\n  original_content = EXCLUDED.original_content,\n  contextual_content = EXCLUDED.contextual_content,\n  content = EXCLUDED.content,\n  embedding = EXCLUDED.embedding;",
+        "options": {}
+      },
+      "id": "74a3550b-3214-4996-8104-f03e988341da",
+      "name": "Insert PGVector",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        2256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "o1oz7Ez2o2RHgqCc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\n\nconst query = String(\n  body.query ||\n  body.chatInput ||\n  body.message ||\n  body.question ||\n  ''\n).trim();\n\nreturn [\n  {\n    json: {\n      query\n    }\n  }\n];"
+      },
+      "id": "ebcf7fa3-bb49-4a5f-abeb-8b5f928aeb5f",
+      "name": "Normalize Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        576,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const query = String($json.query || '').toLowerCase();\n\nlet intent = 'general';\n\nif (\n  query.includes('lien') ||\n  query.includes('url') ||\n  query.includes('site') ||\n  query.includes('menu') ||\n  query.includes('consulter')\n) {\n  intent = 'navigation';\n}\nelse if (\n  query.includes('tarif') ||\n  query.includes('prix') ||\n  query.includes('coût') ||\n  query.includes('cout') ||\n  query.includes('combien')\n) {\n  intent = 'price';\n}\nelse if (\n  query.includes('horaire') ||\n  query.includes('heures') ||\n  query.includes('ouverture') ||\n  query.includes('fermeture')\n) {\n  intent = 'schedule';\n}\nelse if (\n  query.includes('règle') ||\n  query.includes('regle') ||\n  query.includes('interdit') ||\n  query.includes('obligation')\n) {\n  intent = 'rules';\n}\n\nreturn [\n  {\n    json: {\n      query: $json.query,\n      intent\n    }\n  }\n];"
+      },
+      "id": "c5645d2d-2e58-4928-ba82-88ba1c50642a",
+      "name": "Detect Query Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        816,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'nomic-embed-text', prompt: $json.query }) }}",
+        "options": {}
+      },
+      "id": "a19a9275-504a-4966-a3f6-7204df7bb4e2",
+      "name": "Query Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1072,
+        2544
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  chunk_id,\n  document_id,\n  document_name,\n  page_number,\n  original_content,\n  contextual_content,\n  content,\n  1 - (embedding <=> '{{ JSON.stringify($json.embedding) }}'::vector) AS semantic_score\nFROM document_chunks\nWHERE embedding IS NOT NULL\nORDER BY embedding <=> '{{ JSON.stringify($json.embedding) }}'::vector\nLIMIT 30;",
+        "options": {}
+      },
+      "id": "8006e339-1bda-4342-b618-8d5d5f49b28b",
+      "name": "PGVector Top 30",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        2544
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "o1oz7Ez2o2RHgqCc",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://opensearch-node:9200/rag_chunk2/_search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ size: 30, track_total_hits: false, _source: ['chunk_id','document_id','document_name','page_number','content'], query: { bool: { should: [ { match_phrase: { content: { query: $json.query, boost: 6 } } }, { match: { content: { query: $json.query, operator: 'or', boost: 3 } } }, { match: { document_name: { query: $json.query, boost: 2 } } } ], minimum_should_match: 1 } } }) }}",
+        "options": {}
+      },
+      "id": "9286871e-c0c0-4feb-9112-25cfea0dd05c",
+      "name": "BM25 Top 30",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        2848
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const semanticRaw = $('PGVector Top 30').all();\nconst bm25Raw = $('BM25 Top 30').all();\n\nconst intentData = $('Detect Query Intent').first().json;\n\nconst query = intentData.query || '';\nconst intent = intentData.intent || 'general';\n\nconst semantic = semanticRaw.map((item, index) => ({\n  ...item.json,\n  rank: index + 1,\n  source: 'semantic'\n}));\n\nconst lexical = [];\n\nfor (const item of bm25Raw) {\n\n  const hits = item.json?.hits?.hits || [];\n\n  hits.forEach((hit, index) => {\n\n    const source = hit._source || {};\n\n    lexical.push({\n      ...source,\n      bm25_score: hit._score ?? 0,\n      rank: index + 1,\n      source: 'bm25'\n    });\n\n  });\n}\n\nreturn [\n  {\n    json: {\n      query,\n      intent,\n      semantic,\n      lexical\n    }\n  }\n];"
+      },
+      "id": "9a6d4bb2-9454-40d2-9bf3-e36bc634792b",
+      "name": "Prepare Retrieval Lists",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        1776,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const semantic = $json.semantic || [];\nconst lexical = $json.lexical || [];\n\nconst query = $json.query || '';\nconst intent = $json.intent || 'general';\n\nconst K = 60;\n\nconst fused = new Map();\n\nfunction addDocument(doc, rank, source) {\n\n  const id = doc.chunk_id;\n\n  if (!id) {\n    return;\n  }\n\n  if (!fused.has(id)) {\n\n    fused.set(id, {\n      chunk_id: id,\n      document_id: doc.document_id || '',\n      document_name: doc.document_name || 'document.pdf',\n      page_number:\n        doc.page_number !== undefined &&\n        doc.page_number !== null\n          ? doc.page_number\n          : null,\n\n      original_content:\n        doc.original_content ||\n        doc.content ||\n        '',\n\n      contextual_content:\n        doc.contextual_content ||\n        '',\n\n      content:\n        doc.content ||\n        doc.original_content ||\n        '',\n\n      rrf_score: 0,\n\n      ranks: {}\n    });\n\n  }\n\n  const record = fused.get(id);\n\n  let weight = 1;\n\n  /*\n   * Pour les questions où les mots exacts sont importants,\n   * BM25 est légèrement favorisé.\n   */\n\n  if (\n    intent === 'navigation' ||\n    intent === 'price' ||\n    intent === 'schedule' ||\n    intent === 'rules'\n  ) {\n\n    if (source === 'bm25') {\n      weight = 1.5;\n    }\n\n  }\n\n  record.rrf_score += weight / (K + rank);\n\n  record.ranks[source] = rank;\n\n}\n\nfor (const doc of semantic) {\n  addDocument(doc, doc.rank, 'semantic');\n}\n\nfor (const doc of lexical) {\n  addDocument(doc, doc.rank, 'bm25');\n}\n\nconst results = [...fused.values()]\n  .sort((a, b) => b.rrf_score - a.rrf_score)\n  .slice(0, 15);\n\n/*\n * IMPORTANT :\n * On retourne directement les 15 documents comme items.\n *\n * Build Final Context utilisera ensuite :\n * $('RRF Fusion Top 15').all()\n */\n\nreturn results.map((doc, index) => ({\n  json: {\n    ...doc,\n    rrf_rank: index + 1,\n    query,\n    intent\n  }\n}));"
+      },
+      "id": "36bbbe8b-ba5e-4056-a8be-67617559e0fa",
+      "name": "RRF Fusion Top 15",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2016,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const query = $json.query;\nconst documents = items.map(item => item.json);\n\nreturn [\n  {\n    json: {\n      query,\n      intent: $json.intent,\n      documents: documents.map((doc, index) => ({\n        index,\n        text: doc.content || doc.original_content || '',\n        chunk_id: doc.chunk_id,\n        document_id: doc.document_id,\n        document_name: doc.document_name,\n        page_number: doc.page_number\n      }))\n    }\n  }\n];"
+      },
+      "id": "3b737aaa-6980-4ed2-be3c-4db13b230c68",
+      "name": "Build Reranker Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2256,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://tei-reranker:80/rerank",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  query: $json.query,\n  texts: $json.documents.map(d => d.text),\n  raw_scores: false\n}) }}",
+        "options": {}
+      },
+      "id": "410a8e6b-8991-4f60-99e2-e974739c724a",
+      "name": "BGE Reranker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2512,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const query =\n  $('Detect Query Intent').first().json.query || '';\n\nconst intent =\n  $('Detect Query Intent').first().json.intent || 'general';\n\n/*\n * IMPORTANT :\n *\n * RRF Fusion Top 15 retourne 15 ITEMS.\n *\n * Il ne faut PAS faire :\n *\n * $('RRF Fusion Top 15').first().json.results\n *\n * car \"results\" n'existe pas.\n */\n\nconst sourceDocs = $('RRF Fusion Top 15')\n  .all()\n  .map(item => item.json);\n\n\n/* =========================================================\n   Récupération du résultat du reranker\n   ========================================================= */\n\nlet ranked = [];\n\nfor (const item of items) {\n\n  const data = item.json;\n\n  /*\n   * TEI peut retourner directement un tableau.\n   */\n\n  if (Array.isArray(data)) {\n    ranked.push(...data);\n  }\n\n  /*\n   * Ou :\n   *\n   * {\n   *   results: [...]\n   * }\n   */\n\n  if (Array.isArray(data.results)) {\n    ranked.push(...data.results);\n  }\n\n  /*\n   * Ou un résultat individuel :\n   *\n   * {\n   *   index: 0,\n   *   score: 0.91\n   * }\n   */\n\n  if (\n    data.index !== undefined &&\n    data.score !== undefined\n  ) {\n\n    ranked.push(data);\n\n  }\n\n}\n\n\n/* =========================================================\n   Sélection des documents\n   ========================================================= */\n\nlet selectedDocs = [];\n\n\nif (ranked.length > 0) {\n\n  /*\n   * Trier du meilleur score au plus faible.\n   */\n\n  ranked.sort(\n    (a, b) =>\n      Number(b.score) -\n      Number(a.score)\n  );\n\n\n  /*\n   * Récupérer le document correspondant à l'index\n   * envoyé au reranker.\n   */\n\n  for (const result of ranked) {\n\n    const index = Number(result.index);\n\n    if (!Number.isInteger(index)) {\n      continue;\n    }\n\n    if (!sourceDocs[index]) {\n      continue;\n    }\n\n    selectedDocs.push({\n      ...sourceDocs[index],\n      rerank_score: Number(result.score)\n    });\n\n  }\n\n} else {\n\n  /*\n   * Fallback :\n   * si le reranker ne retourne rien,\n   * on utilise directement RRF.\n   */\n\n  selectedDocs = sourceDocs.map(doc => ({\n    ...doc,\n    rerank_score: 0\n  }));\n\n}\n\n\n/* =========================================================\n   Nettoyage du texte\n   ========================================================= */\n\nfunction cleanText(text) {\n\n  return String(text || '')\n    .replace(/\\r/g, '')\n    .replace(/\\n{3,}/g, '\\n\\n')\n    .replace(/[ \\t]{2,}/g, ' ')\n    .trim();\n\n}\n\n\n/* =========================================================\n   Extraction des URLs\n   ========================================================= */\n\nfunction extractUrls(text) {\n\n  const matches =\n    String(text || '').match(\n      /https?:\\/\\/[^\\s<>\"')\\]]+/gi\n    ) || [];\n\n  return [\n    ...new Set(\n      matches.map(url =>\n        url.replace(/[.,;:!?]+$/g, '')\n      )\n    )\n  ];\n\n}\n\n\n/* =========================================================\n   Déduplication\n   ========================================================= */\n\nconst unique = [];\n\nfor (const doc of selectedDocs) {\n\n  const text = cleanText(\n    doc.content ||\n    doc.original_content ||\n    ''\n  );\n\n  if (!text) {\n    continue;\n  }\n\n  const normalized = text\n    .toLowerCase()\n    .replace(/\\s+/g, ' ')\n    .trim();\n\n\n  const duplicate = unique.some(existing => {\n\n    const existingText =\n      existing.normalized;\n\n    /*\n     * Même texte\n     */\n\n    if (existingText === normalized) {\n      return true;\n    }\n\n\n    /*\n     * Un chunk contient presque entièrement\n     * l'autre.\n     */\n\n    if (\n      normalized.length > 150 &&\n      existingText.length > 150\n    ) {\n\n      if (\n        normalized.includes(existingText) ||\n        existingText.includes(normalized)\n      ) {\n\n        return true;\n\n      }\n\n    }\n\n    return false;\n\n  });\n\n\n  if (!duplicate) {\n\n    unique.push({\n      ...doc,\n      cleaned_text: text,\n      normalized\n    });\n\n  }\n\n}\n\n\n/* =========================================================\n   Nombre maximum de documents\n   ========================================================= */\n\nconst finalDocs =\n  unique.slice(0, 5);\n\n\n/* =========================================================\n   Construction du contexte\n   ========================================================= */\n\nconst contextParts = [];\n\nconst sources = [];\n\n\nfinalDocs.forEach((doc, index) => {\n\n  const sourceNumber = index + 1;\n\n  const documentName =\n    doc.document_name ||\n    'document.pdf';\n\n\n  const page =\n    doc.page_number !== null &&\n    doc.page_number !== undefined\n      ? doc.page_number\n      : null;\n\n\n  const urls =\n    extractUrls(doc.cleaned_text);\n\n\n  let block = '';\n\n  block += `[SOURCE ${sourceNumber}]\\n`;\n\n  block += `Document: ${documentName}\\n`;\n\n  if (page !== null) {\n    block += `Page: ${page}\\n`;\n  } else {\n    block += `Page: non disponible\\n`;\n  }\n\n\n  /*\n   * Les URLs sont affichées séparément.\n   * Cela aide énormément Llama pour les questions\n   * du type \"donne-moi le lien\".\n   */\n\n  if (urls.length > 0) {\n\n    block += `URLS EXACTES:\\n`;\n\n    for (const url of urls) {\n      block += `${url}\\n`;\n    }\n\n  }\n\n\n  block += `\\nCONTENU:\\n`;\n\n  block += doc.cleaned_text;\n\n\n  contextParts.push(block);\n\n\n  sources.push({\n    source: sourceNumber,\n\n    document_name:\n      documentName,\n\n    page_number:\n      page,\n\n    chunk_id:\n      doc.chunk_id || null,\n\n    document_id:\n      doc.document_id || null,\n\n    rerank_score:\n      doc.rerank_score || 0,\n\n    rrf_score:\n      doc.rrf_score || 0,\n\n    urls\n  });\n\n});\n\n\n/* =========================================================\n   Contexte final\n   ========================================================= */\n\nconst context =\n  contextParts.join(\n    '\\n\\n==============================\\n\\n'\n  );\n\n\n/* =========================================================\n   OUTPUT\n   ========================================================= */\n\nreturn [\n  {\n    json: {\n\n      query,\n\n      intent,\n\n      context,\n\n      sources,\n\n      source_count:\n        finalDocs.length\n\n    }\n  }\n];"
+      },
+      "id": "53ee05e2-1a83-4b98-96e7-080984aa36f8",
+      "name": "Build Final Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        2752,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: 'llama3.2:latest',\n  stream: false,\n  options: {\n    temperature: 0\n  },\n  prompt:\n`Tu es un assistant administratif de l'ENIB.\n\nTu dois répondre uniquement à partir des documents fournis dans le CONTEXTE.\n\nQUESTION :\n${$json.query}\n\nINTENTION :\n${$json.intent}\n\nCONTEXTE :\n${$json.context}\n\nRÈGLES STRICTES :\n\n1. Réponds directement à la question.\n\n2. Utilise uniquement les informations présentes dans le CONTEXTE.\n\n3. N'utilise aucune connaissance externe.\n\n4. N'invente aucune information.\n\n5. Ignore les informations du contexte qui ne répondent pas à la question.\n\n6. Si la question demande un lien ou une URL, donne EXACTEMENT l'URL présente dans le CONTEXTE.\n\n7. Ne modifie jamais une URL.\n\n8. Si plusieurs URLs sont présentes, choisis uniquement celle qui répond à la question.\n\n9. Si la question demande un prix, donne exactement le prix indiqué dans le document.\n\n10. Si la question demande des horaires, donne exactement les horaires indiqués dans le document.\n\n11. Si la question demande des règles, consignes ou obligations, donne uniquement les règles pertinentes.\n\n12. Utilise [SOURCE X] pour indiquer la source de l'information.\n\n13. Ne donne pas les autres informations présentes dans les documents si elles ne sont pas nécessaires pour répondre.\n\n14. Si aucune information du CONTEXTE ne permet de répondre à la question, réponds exactement :\n\nJe ne trouve pas cette information dans les documents fournis.\n\nEXEMPLE :\n\nQuestion :\nle lien pour consulter le menu\n\nSi le contexte contient :\nhttps://services.imt-atlantique.fr/rak/pagemenu.php\n\nRéponse :\nLe menu du RAK est disponible ici :\nhttps://services.imt-atlantique.fr/rak/pagemenu.php\n\n[SOURCE 1]\n\nRéponds maintenant à la question.`\n}) }}",
+        "options": {}
+      },
+      "id": "9349289e-812a-493c-90eb-c4ea0b336718",
+      "name": "Llama Final Answer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2976,
+        2688
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const answer =\n  $json.response ||\n  $json.output ||\n  $json.text ||\n  '';\n\nconst finalContext =\n  $('Build Final Context').first().json;\n\nreturn [\n  {\n    json: {\n\n      output: answer,\n\n      answer: answer,\n\n      sources:\n        finalContext.sources || [],\n\n      query:\n        finalContext.query || '',\n\n      source_count:\n        finalContext.source_count || 0\n\n    }\n  }\n];"
+      },
+      "id": "331a4632-58f4-4b04-b839-c7844bc5fee6",
+      "name": "Return Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        3200,
+        2688
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "6c3f41f9-9c6e-4f6a-a912-8eeeab7e1fed",
+      "name": "Merge2",
+      "type": "n8n-nodes-base.merge",
+      "position": [
+        1552,
+        2688
+      ],
+      "typeVersion": 3
+    },
+    {
+      "parameters": {
+        "multipleMethods": true,
+        "httpMethod": [
+          "POST"
+        ],
+        "path": "upload-document",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*",
+          "responseHeaders": {
+            "entries": []
+          }
+        }
+      },
+      "id": "95ad3f67-a374-40f7-bc04-1548d1f81588",
+      "name": "Upload PDF Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [
+        288,
+        2080
+      ],
+      "typeVersion": 2,
+      "webhookId": "916b363f-f48a-4937-8233-f98fb2f59b4b",
+      "notesInFlow": true,
+      "notes": "Accepts a multipart/form-data POST from the React frontend, field name 'data' (matches 'Extract PDF Text' below). Set 'options.allowedOrigins' to your real frontend origin in production instead of '*'. Responds immediately via 'Respond - PDF Received' while chunking/embedding continues in the background."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"processing\", message: \"Document received, indexing in the background.\", document_id: $json.document_id || $execution.id }) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type"
+              }
+            ]
+          }
+        }
+      },
+      "id": "82faf7b4-63ea-4348-8bd1-35b4435185d6",
+      "name": "Respond - PDF Received",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        608,
+        2272
+      ],
+      "typeVersion": 1.1,
+      "notesInFlow": true,
+      "notes": "Responds right away so the browser isn't left waiting through chunking/contextualizing/embedding, which can take a while for a large PDF. The rest of the pipeline keeps running after this responds."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "1f932a55-7eeb-4a82-9dce-dce19fe810f4",
+      "name": "Chat Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [
+        304,
+        2688
+      ],
+      "typeVersion": 2,
+      "webhookId": "2ad1395f-7cc3-47d3-a44c-9a012a8ba532",
+      "notesInFlow": true,
+      "notes": "Expects JSON body { chatInput, sessionId } from the React chat panel - matches what 'Normalize Query3' already reads. Set 'options.allowedOrigins' to your real frontend origin in production instead of '*'."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ output: $json.output, answer: $json.answer, sources: $json.sources }) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type"
+              }
+            ]
+          }
+        }
+      },
+      "id": "7d8802b3-398d-4bb5-a2e4-1542abdf2156",
+      "name": "Respond - Chat Answer",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "position": [
+        3424,
+        2688
+      ],
+      "typeVersion": 1.1,
+      "notesInFlow": true,
+      "notes": "Sends 'Return Answer3' output back over HTTP - this is what src/lib/api.js's sendChatMessage() reads."
+    },
+    {
+      "parameters": {
+        "content": "## Creation BD",
+        "height": 464,
+        "width": 624,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        208,
+        1344
+      ],
+      "typeVersion": 1,
+      "id": "64a0468a-6cc7-4477-bff0-25ac9fdb59d6",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Preprocessing ",
+        "height": 560,
+        "width": 1904,
+        "color": "#D32727"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        208,
+        1856
+      ],
+      "typeVersion": 1,
+      "id": "fa59c847-6364-415c-88cf-8a338edff4aa",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## RAG",
+        "height": 544,
+        "width": 3376,
+        "color": "#00993B"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        224,
+        2480
+      ],
+      "typeVersion": 1,
+      "id": "ef53e240-897e-46e2-b0a1-edb34609a1d2",
+      "name": "Sticky Note2"
+    }
+  ],
+  "connections": {
+    "Setup Trigger": {
+      "main": [
+        [
+          {
+            "node": "Create PostgreSQL Schema",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create OpenSearch Index",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Chunk Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Document": {
+      "main": [
+        [
+          {
+            "node": "Build Index Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Index Record": {
+      "main": [
+        [
+          {
+            "node": "Index BM25 OpenSearch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store BM25 Metadata",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Embedding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge With Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Embedding": {
+      "main": [
+        [
+          {
+            "node": "Merge With Embedding",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge With Embedding": {
+      "main": [
+        [
+          {
+            "node": "Insert PGVector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Query": {
+      "main": [
+        [
+          {
+            "node": "Detect Query Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Query Intent": {
+      "main": [
+        [
+          {
+            "node": "Query Embedding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "BM25 Top 30",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Embedding": {
+      "main": [
+        [
+          {
+            "node": "PGVector Top 30",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PGVector Top 30": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BM25 Top 30": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Prepare Retrieval Lists": {
+      "main": [
+        [
+          {
+            "node": "RRF Fusion Top 15",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RRF Fusion Top 15": {
+      "main": [
+        [
+          {
+            "node": "Build Reranker Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reranker Payload": {
+      "main": [
+        [
+          {
+            "node": "BGE Reranker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "BGE Reranker": {
+      "main": [
+        [
+          {
+            "node": "Build Final Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Context": {
+      "main": [
+        [
+          {
+            "node": "Llama Final Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llama Final Answer": {
+      "main": [
+        [
+          {
+            "node": "Return Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Answer": {
+      "main": [
+        [
+          {
+            "node": "Respond - Chat Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retrieval Lists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload PDF Webhook": {
+      "main": [
+        [
+          {
+            "node": "Respond - PDF Received",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "c3b73a8f0d30ddcaf599f9ce1cf62a1546b839201172379fb4aa9beee56136a5"
+  }
+}
