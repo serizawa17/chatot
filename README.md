@@ -1051,3 +1051,7 @@ LLM
 Projet académique.
 
 La réutilisation et la distribution des documents administratifs utilisés pour l'indexation doivent respecter les droits et conditions applicables aux documents concernés.
+
+
+<img width="1433" height="736" alt="image" src="https://github.com/user-attachments/assets/bd504178-4751-4b6d-934b-83acbcc6b889" />
+
